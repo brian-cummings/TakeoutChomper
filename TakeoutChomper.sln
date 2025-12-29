@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TakeoutChomper.Downloader", "TakeoutChomper.Downloader\TakeoutChomper.Downloader.csproj", "{5CC3C2AF-7835-0F45-7957-DBB88D20FA05}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TakeoutChomper.Processor", "TakeoutChomper.Processor\TakeoutChomper.Processor.csproj", "{A8BFED1E-FF24-DF36-8CFD-B2674CF0BBA4}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5CC3C2AF-7835-0F45-7957-DBB88D20FA05}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5CC3C2AF-7835-0F45-7957-DBB88D20FA05}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5CC3C2AF-7835-0F45-7957-DBB88D20FA05}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5CC3C2AF-7835-0F45-7957-DBB88D20FA05}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A8BFED1E-FF24-DF36-8CFD-B2674CF0BBA4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A8BFED1E-FF24-DF36-8CFD-B2674CF0BBA4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A8BFED1E-FF24-DF36-8CFD-B2674CF0BBA4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A8BFED1E-FF24-DF36-8CFD-B2674CF0BBA4}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {AFF950AC-CCFC-49FA-B4F6-B9E0634C81D2}
+	EndGlobalSection
+EndGlobal
