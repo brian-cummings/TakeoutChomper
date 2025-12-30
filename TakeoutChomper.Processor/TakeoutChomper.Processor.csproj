@@ -15,6 +15,7 @@
   <ItemGroup>
     <Compile Include="..\Shared\PathLayout.cs" Link="Shared/PathLayout.cs" />
     <Compile Include="..\Shared\StateStore.cs" Link="Shared/StateStore.cs" />
+    <Compile Include="..\Shared\ZipManifest.cs" Link="Shared/ZipManifest.cs" />
   </ItemGroup>
 
 </Project>

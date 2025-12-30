@@ -61,10 +61,10 @@ finally
 
 static async Task ProcessZipAsync(string zipName, PathLayout paths, StateStore state, CancellationToken cancellationToken)
 {
-    var zipPath = Path.Combine(paths.DownloadsPath, zipName);
+    var zipPath = await ResolveZipPathAsync(zipName, paths, state);
     Console.WriteLine($"Processing {zipName}...");
 
-    if (!File.Exists(zipPath))
+    if (zipPath is null || !File.Exists(zipPath))
     {
         await state.MarkFailedAsync(zipName, "Zip missing from downloads folder.");
         return;
@@ -206,6 +206,46 @@ static async Task PrintFinalSummaryAsync(StateStore state, PathLayout paths)
         ? IODirectory.EnumerateFiles(paths.DownloadsPath, "*.zip", System.IO.SearchOption.TopDirectoryOnly).Count()
         : 0;
     Console.WriteLine($"  zips on disk: {onDisk}");
+}
+
+static async Task<string?> ResolveZipPathAsync(string zipName, PathLayout paths, StateStore state)
+{
+    var primaryPath = IOPath.Combine(paths.DownloadsPath, zipName);
+    if (IOFile.Exists(primaryPath))
+    {
+        return primaryPath;
+    }
+
+    var meta = await state.GetZipMetadataAsync(zipName);
+    if (!string.IsNullOrWhiteSpace(meta?.LastSuggestedName))
+    {
+        var suggestedPath = IOPath.Combine(paths.DownloadsPath, meta.LastSuggestedName!);
+        if (IOFile.Exists(suggestedPath))
+        {
+            return suggestedPath;
+        }
+    }
+
+    if (!string.IsNullOrWhiteSpace(meta?.ManifestHash))
+    {
+        foreach (var file in IODirectory.EnumerateFiles(paths.DownloadsPath, "*.zip", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                var manifest = ZipManifest.ComputeManifestHash(file);
+                if (string.Equals(manifest, meta.ManifestHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return file;
+                }
+            }
+            catch
+            {
+                // Ignore hash failures on individual files.
+            }
+        }
+    }
+
+    return null;
 }
 
 static string BuildSafeName(string? originalName, string hash, string extension)

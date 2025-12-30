@@ -80,13 +80,14 @@ if (IsOnAccountsLogin(page.Url))
 await NavigateToArchiveDetailIfNeeded(page);
 
 Console.WriteLine("Scanning for downloads...");
-var attempt = 1;
+var attemptCounter = 0;
 var idleCycles = 0;
 const int maxIdleCycles = 10;
+var targetJob = Environment.GetEnvironmentVariable("TAKEOUTCHOMPER_JOB_FILTER");
 
 while (idleCycles < maxIdleCycles)
 {
-    var downloadButtons = await FindDownloadButtonsAsync(page);
+    var downloadButtons = await FindDownloadButtonsAsync(page, targetJob);
     if (downloadButtons.Count == 0)
     {
         idleCycles++;
@@ -103,6 +104,7 @@ while (idleCycles < maxIdleCycles)
         await state.MarkDiscoveredAsync(candidate.PlaceholderName);
     }
 
+    var startedThisPass = 0;
     foreach (var candidate in downloadButtons)
     {
         // Skip upfront if we already have it on disk or recorded.
@@ -112,13 +114,20 @@ while (idleCycles < maxIdleCycles)
             continue;
         }
 
-        var result = await TryDownloadAsync(page, candidate, attempt);
-        attempt++;
+        var attemptNumber = Interlocked.Increment(ref attemptCounter);
+        var result = await TryDownloadAsync(page, candidate, attemptNumber);
+        startedThisPass++;
         if (!result)
         {
             // Likely hit login or failure; stop further clicks this pass.
             break;
         }
+    }
+
+    if (startedThisPass == 0)
+    {
+        // Nothing to do; avoid looping forever.
+        break;
     }
 
     // After clicking, wait a bit for the page to update (e.g., buttons disable).
@@ -135,15 +144,16 @@ async Task<bool> TryDownloadAsync(IPage page, DownloadCandidate candidate, int a
     try
     {
         await candidate.Locator.ScrollIntoViewIfNeededAsync();
-        Console.WriteLine($"[{attemptNumber}] Triggering download...");
+        Console.WriteLine($"[{attemptNumber}] Triggering download via {candidate.PlaceholderName}...");
 
         var download = await page.RunAndWaitForDownloadAsync(async () =>
         {
-            await candidate.Locator.ClickAsync(new LocatorClickOptions { Timeout = 60_000 });
+            await candidate.Locator.ClickAsync(new LocatorClickOptions { Timeout = 120_000 });
         }, new PageRunAndWaitForDownloadOptions { Timeout = 600_000 });
 
-        // Stick to the placeholder name for stability/idempotency.
+        // Stick to the placeholder name for tracking, but preserve Google's suggested filename on disk.
         var zipName = candidate.PlaceholderName;
+        var targetFileName = download.SuggestedFilename ?? zipName;
 
         await state.MarkDiscoveredAsync(zipName);
         if (await state.ShouldSkipDownloadAsync(zipName, paths.DownloadsPath, candidate.PlaceholderName))
@@ -161,8 +171,8 @@ async Task<bool> TryDownloadAsync(IPage page, DownloadCandidate candidate, int a
             return true;
         }
 
-        await state.MarkDownloadingAsync(zipName, null);
-        var destination = Path.Combine(paths.DownloadsPath, zipName);
+        await state.MarkDownloadingAsync(zipName, null, download.SuggestedFilename);
+        var destination = Path.Combine(paths.DownloadsPath, targetFileName);
         await download.SaveAsAsync(destination);
 
         if (!File.Exists(destination))
@@ -172,8 +182,18 @@ async Task<bool> TryDownloadAsync(IPage page, DownloadCandidate candidate, int a
         }
 
         var size = new FileInfo(destination).Length;
-        await state.MarkDownloadedAsync(zipName, size);
-        Console.WriteLine($"[{attemptNumber}] Saved {zipName} ({size} bytes)");
+        string? manifestHash = null;
+        try
+        {
+            manifestHash = ZipManifest.ComputeManifestHash(destination);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{attemptNumber}] Unable to compute manifest hash for {zipName}: {ex.Message}");
+        }
+
+        await state.MarkDownloadedAsync(zipName, size, download.SuggestedFilename, manifestHash);
+        Console.WriteLine($"[{attemptNumber}] Saved {zipName} ({size} bytes){(manifestHash is null ? string.Empty : $" manifest={manifestHash}")}");
         return true;
     }
     catch (TimeoutException ex)
@@ -201,7 +221,7 @@ async Task<bool> TryDownloadAsync(IPage page, DownloadCandidate candidate, int a
     return false;
 }
 
-static async Task<IReadOnlyList<DownloadCandidate>> FindDownloadButtonsAsync(IPage page)
+static async Task<IReadOnlyList<DownloadCandidate>> FindDownloadButtonsAsync(IPage page, string? jobFilter)
 {
     // Narrow to archive detail downloads (not the archive list).
     var hrefLocs = await page.Locator("a[href*=\"takeout.google.com/takeout/download\" i][href*=\"/takeout/download\" i]").ElementHandlesAsync();
@@ -216,14 +236,13 @@ static async Task<IReadOnlyList<DownloadCandidate>> FindDownloadButtonsAsync(IPa
             continue;
         }
 
-        var loc = page.Locator($"a[href=\"{href}\"]");
-        if (!await loc.IsVisibleAsync())
+        var placeholder = BuildPlaceholderName(href, fallbackIndex);
+        if (!IsAllowedJob(placeholder, jobFilter))
         {
             continue;
         }
 
-        var placeholder = BuildPlaceholderName(href, fallbackIndex);
-        hrefMap.Add(new DownloadCandidate(loc, placeholder));
+        hrefMap.Add(new DownloadCandidate(page.Locator($"a[href=\"{href}\"]"), href, placeholder));
         fallbackIndex++;
     }
 
@@ -243,8 +262,19 @@ static async Task<IReadOnlyList<DownloadCandidate>> FindDownloadButtonsAsync(IPa
                 continue;
             }
 
-            var placeholder = BuildPlaceholderName(null, fallbackIndex);
-            hrefMap.Add(new DownloadCandidate(loc, placeholder));
+            var href = await loc.GetAttributeAsync("href");
+            if (string.IsNullOrWhiteSpace(href))
+            {
+                continue;
+            }
+
+            var placeholder = BuildPlaceholderName(href, fallbackIndex);
+            if (!IsAllowedJob(placeholder, jobFilter))
+            {
+                continue;
+            }
+
+            hrefMap.Add(new DownloadCandidate(loc, href, placeholder));
             fallbackIndex++;
         }
     }
@@ -509,4 +539,24 @@ static string BuildPlaceholderName(string? href, int index)
     return $"takeout-part-{index:D4}.zip";
 }
 
-internal sealed record DownloadCandidate(ILocator Locator, string PlaceholderName);
+static bool IsAllowedJob(string placeholderName, string? jobFilter)
+{
+    if (string.IsNullOrWhiteSpace(jobFilter))
+    {
+        return true;
+    }
+
+    if (!placeholderName.StartsWith("takeout-", StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    var parts = placeholderName.Split('-', StringSplitOptions.RemoveEmptyEntries);
+    if (parts.Length < 3)
+    {
+        return false;
+    }
+
+    var jobId = parts[1];
+    return jobId.Equals(jobFilter, StringComparison.OrdinalIgnoreCase);
+}

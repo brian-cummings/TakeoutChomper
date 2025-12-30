@@ -33,7 +33,9 @@ internal sealed class StateStore : IAsyncDisposable
                 size_bytes INTEGER,
                 started_at DATETIME,
                 completed_at DATETIME,
-                error TEXT
+                error TEXT,
+                last_suggested_name TEXT,
+                zip_manifest_hash TEXT
             );
             CREATE TABLE IF NOT EXISTS videos (
                 sha256 TEXT PRIMARY KEY,
@@ -68,6 +70,28 @@ internal sealed class StateStore : IAsyncDisposable
         {
             // Column likely exists; ignore.
         }
+
+        try
+        {
+            await using var alter3 = connection.CreateCommand();
+            alter3.CommandText = "ALTER TABLE zips ADD COLUMN last_suggested_name TEXT";
+            await alter3.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException)
+        {
+            // Column likely exists; ignore.
+        }
+
+        try
+        {
+            await using var alter4 = connection.CreateCommand();
+            alter4.CommandText = "ALTER TABLE zips ADD COLUMN zip_manifest_hash TEXT";
+            await alter4.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException)
+        {
+            // Column likely exists; ignore.
+        }
     }
 
     public async Task ResetProcessingToDownloadedAsync()
@@ -87,14 +111,14 @@ internal sealed class StateStore : IAsyncDisposable
         await command.ExecuteNonQueryAsync();
     }
 
-    public async Task MarkDownloadingAsync(string zipName, long? sizeBytes)
+    public async Task MarkDownloadingAsync(string zipName, long? sizeBytes, string? suggestedName)
     {
-        await UpsertZip(zipName, "downloading", sizeBytes, startedAt: null, completedAt: null, error: null);
+        await UpsertZip(zipName, "downloading", sizeBytes, startedAt: null, completedAt: null, error: null, suggestedName, manifestHash: null);
     }
 
-    public async Task MarkDownloadedAsync(string zipName, long? sizeBytes)
+    public async Task MarkDownloadedAsync(string zipName, long? sizeBytes, string? suggestedName, string? manifestHash)
     {
-        await UpsertZip(zipName, "downloaded", sizeBytes, startedAt: null, completedAt: null, error: null);
+        await UpsertZip(zipName, "downloaded", sizeBytes, startedAt: null, completedAt: null, error: null, suggestedName, manifestHash);
     }
 
     public async Task MarkProcessingAsync(string zipName)
@@ -142,6 +166,21 @@ internal sealed class StateStore : IAsyncDisposable
         return onDisk;
     }
 
+    public async Task<string?> GetZipNameByManifestHashAsync(string? manifestHash)
+    {
+        if (string.IsNullOrWhiteSpace(manifestHash))
+        {
+            return null;
+        }
+
+        await using var connection = await OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT zip_name FROM zips WHERE zip_manifest_hash = $hash LIMIT 1";
+        command.Parameters.AddWithValue("$hash", manifestHash);
+        var result = await command.ExecuteScalarAsync();
+        return result as string;
+    }
+
 
     public async Task ReconcileExistingDownloadsAsync(string downloadsPath)
     {
@@ -149,7 +188,18 @@ internal sealed class StateStore : IAsyncDisposable
         {
             var name = Path.GetFileName(file);
             var size = new FileInfo(file).Length;
-            await MarkDownloadedAsync(name, size);
+            string? manifestHash = null;
+            try
+            {
+                manifestHash = ZipManifest.ComputeManifestHash(file);
+            }
+            catch
+            {
+                // Ignore hash errors during reconciliation.
+            }
+
+            var targetName = await GetZipNameByManifestHashAsync(manifestHash) ?? name;
+            await MarkDownloadedAsync(targetName, size, null, manifestHash);
         }
     }
 
@@ -230,25 +280,47 @@ internal sealed class StateStore : IAsyncDisposable
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    private async Task UpsertZip(string zipName, string status, long? sizeBytes, DateTime? startedAt, DateTime? completedAt, string? error)
+    public async Task<ZipMeta?> GetZipMetadataAsync(string zipName)
+    {
+        await using var connection = await OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT last_suggested_name, zip_manifest_hash FROM zips WHERE zip_name = $name";
+        command.Parameters.AddWithValue("$name", zipName);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return null;
+        }
+
+        var suggested = reader.IsDBNull(0) ? null : reader.GetString(0);
+        var manifest = reader.IsDBNull(1) ? null : reader.GetString(1);
+        return new ZipMeta(zipName, suggested, manifest);
+    }
+
+    private async Task UpsertZip(string zipName, string status, long? sizeBytes, DateTime? startedAt, DateTime? completedAt, string? error, string? suggestedName = null, string? manifestHash = null)
     {
         await using var connection = await OpenConnectionAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = @"
-            INSERT INTO zips(zip_name, status, size_bytes, started_at, completed_at, error)
-            VALUES ($name, $status, $size, $started, $completed, $error)
+            INSERT INTO zips(zip_name, status, size_bytes, started_at, completed_at, error, last_suggested_name, zip_manifest_hash)
+            VALUES ($name, $status, $size, $started, $completed, $error, $suggested, $manifest)
             ON CONFLICT(zip_name) DO UPDATE SET
                 status = excluded.status,
                 size_bytes = COALESCE(excluded.size_bytes, zips.size_bytes),
                 started_at = COALESCE(excluded.started_at, zips.started_at),
                 completed_at = excluded.completed_at,
-                error = excluded.error";
+                error = excluded.error,
+                last_suggested_name = COALESCE(excluded.last_suggested_name, zips.last_suggested_name),
+                zip_manifest_hash = COALESCE(excluded.zip_manifest_hash, zips.zip_manifest_hash)";
         command.Parameters.AddWithValue("$name", zipName);
         command.Parameters.AddWithValue("$status", status);
         command.Parameters.AddWithValue("$size", sizeBytes.HasValue ? sizeBytes.Value : DBNull.Value);
         command.Parameters.AddWithValue("$started", startedAt.HasValue ? startedAt.Value : DBNull.Value);
         command.Parameters.AddWithValue("$completed", completedAt.HasValue ? completedAt.Value : DBNull.Value);
         command.Parameters.AddWithValue("$error", error ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$suggested", string.IsNullOrWhiteSpace(suggestedName) ? (object)DBNull.Value : suggestedName);
+        command.Parameters.AddWithValue("$manifest", string.IsNullOrWhiteSpace(manifestHash) ? (object)DBNull.Value : manifestHash);
         await command.ExecuteNonQueryAsync();
     }
 
@@ -261,3 +333,4 @@ internal sealed class StateStore : IAsyncDisposable
 }
 
 internal record ZipWork(string ZipName, long? SizeBytes);
+internal record ZipMeta(string ZipName, string? LastSuggestedName, string? ManifestHash);
